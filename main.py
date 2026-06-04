@@ -9,7 +9,7 @@ import os
 import re
 import json
 import httpx
-import asyncpg
+import psycopg2
 from datetime import datetime
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -39,22 +39,20 @@ DB_PASSWORD    = os.getenv("DB_PASSWORD", "")
 # ════════════════════════════════════════════════════════
 #  BASE DE DATOS
 # ════════════════════════════════════════════════════════
-async def get_db():
-    return await asyncpg.connect(
+def guardar_auditoria(data: dict):
+    conn = psycopg2.connect(
         host=DB_HOST, port=DB_PORT,
-        database=DB_NAME, user=DB_USER, password=DB_PASSWORD
+        dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD
     )
-
-async def guardar_auditoria(data: dict):
-    conn = await get_db()
     try:
-        await conn.execute("""
+        cur = conn.cursor()
+        cur.execute("""
             INSERT INTO auditorias (
                 id_bitrix, asesor, fecha_creacion_lead, fecha_hora_auditada,
                 conversacion_anonimizada, puntuacion_venta, puntuacion_atc,
                 calificacion, observacion
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-        """,
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """, (
             data["id_bitrix"],
             data["asesor"],
             data["fecha_creacion_lead"],
@@ -64,10 +62,11 @@ async def guardar_auditoria(data: dict):
             data["puntuacion_atc"],
             data["calificacion"],
             data["observacion"]
-        )
+        ))
+        conn.commit()
         log.info(f"Auditoria guardada para deal {data['id_bitrix']}")
     finally:
-        await conn.close()
+        conn.close()
 
 
 # ════════════════════════════════════════════════════════
@@ -274,7 +273,7 @@ async def procesar_deal(deal_id: str):
     log.info(f"Análisis: {json.dumps(analisis, ensure_ascii=False)}")
 
     # Guardar en PostgreSQL
-    await guardar_auditoria({
+    guardar_auditoria({
         "id_bitrix":               deal_id,
         "asesor":                  nombre_asesor,
         "fecha_creacion_lead":     fecha_creacion,
