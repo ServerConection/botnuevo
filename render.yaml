@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: netlife-atc-detector
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: BITRIX_WEBHOOK
+        value: https://novonet.bitrix24.es/rest/87387/vcca209sfcjflxp8
+      - key: ATC_STAGE_ID
+        value: C19:UC_U0JYD8
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama3-8b-8192
+      - key: DB_HOST
+        value: dpg-d5l6jvh4tr6s738gfr60-a.oregon-postgres.render.com
+      - key: DB_PORT
+        value: "5432"
+      - key: DB_NAME
+        value: bddgeneral
+      - key: DB_USER
+        value: bdd_admin
+      - key: DB_PASSWORD
+        sync: false
