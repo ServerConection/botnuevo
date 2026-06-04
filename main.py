@@ -219,7 +219,6 @@ async def analizar_con_groq(conversacion: str) -> dict:
             {"role": "user",   "content": f"--- CONVERSACIÓN ---\n{conversacion}\n--- FIN ---"}
         ],
         "temperature": 0.2,
-        "response_format": {"type": "json_object"}
     }
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post("https://api.groq.com/openai/v1/chat/completions",
