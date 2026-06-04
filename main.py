@@ -223,7 +223,9 @@ async def analizar_con_groq(conversacion: str) -> dict:
     async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post("https://api.groq.com/openai/v1/chat/completions",
                                  headers=headers, json=payload)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            log.error(f"Groq error {resp.status_code}: {resp.text}")
+            resp.raise_for_status()
         raw = resp.json()["choices"][0]["message"]["content"]
 
     try:
