@@ -40,11 +40,11 @@ EMPRESAS = {
         "atc_stage":    os.getenv("NOVONET_ATC_STAGE", "C19:UC_U0JYD8"),
         "wazzup_key":   os.getenv("NOVONET_WAZZUP_KEY", "7b535e6f961d4cfd8282fffbbd36fa8c"),
     },
-    "vensa": {
-        "nombre":       "VENSA",
-        "bitrix":       os.getenv("VENSA_BITRIX", "https://aclopecuador.bitrix24.es/rest/1/49hra49433psie0t"),
-        "atc_stage":    os.getenv("VENSA_ATC_STAGE", ""),
-        "wazzup_key":   os.getenv("VENSA_WAZZUP_KEY", "3340c8993cf940639f06cf894e2b8143"),
+    "velsa": {
+        "nombre":       "VELSA",
+        "bitrix":       os.getenv("VELSA_BITRIX", "https://aclopecuador.bitrix24.es/rest/1/49hra49433psie0t"),
+        "atc_stage":    os.getenv("VELSA_ATC_STAGE", ""),
+        "wazzup_key":   os.getenv("VELSA_WAZZUP_KEY", "3340c8993cf940639f06cf894e2b8143"),
     },
 }
 # ─────────────────────────────────────────────────────────
@@ -94,7 +94,7 @@ async def webhook_novonet(request: Request, background_tasks: BackgroundTasks):
 
 @app.post("/webhook/vensa")
 async def webhook_vensa(request: Request, background_tasks: BackgroundTasks):
-    return await handle_webhook(request, background_tasks, "vensa")
+    return await handle_webhook(request, background_tasks, "velsa")
 
 
 async def handle_webhook(request: Request, background_tasks: BackgroundTasks, empresa_key: str):
@@ -290,15 +290,16 @@ async def procesar_deal(deal_id: str, empresa: dict):
     mensajes, usuarios = await obtener_mensajes(empresa["bitrix"], chat_id)
 
     if not mensajes:
-        log.warning(f"Chat {chat_id} vacío o es WABA.")
+        log.warning(f"Chat {chat_id} sin mensajes accesibles.")
+        obs = "Canal WABA (Meta API): historial no accesible." if tipo_canal == "WABA" else "No se encontraron mensajes en el chat. Posible problema de permisos del webhook."
         guardar_auditoria({
             "id_bitrix": deal_id, "asesor": asesor,
             "fecha_creacion_lead": fecha_creacion,
-            "conversacion_anonimizada": "Canal WABA - historial no disponible via API",
+            "conversacion_anonimizada": "Sin mensajes disponibles",
             "puntuacion_venta": 0, "puntuacion_atc": 0,
             "calificacion": "ATC",
-            "observacion": "Canal WABA (Meta API): el historial no es accesible via Bitrix24. Se requiere integración directa con Meta.",
-            "empresa": empresa["nombre"], "tipo_canal": "WABA"
+            "observacion": obs,
+            "empresa": empresa["nombre"], "tipo_canal": tipo_canal
         })
         return
 

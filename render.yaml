@@ -25,9 +25,9 @@ services:
         value: C19:UC_U0JYD8
       - key: NOVONET_WAZZUP_KEY
         sync: false
-      - key: VENSA_BITRIX
+      - key: VELSA_BITRIX
         value: https://aclopecuador.bitrix24.es/rest/1/49hra49433psie0t
-      - key: VENSA_ATC_STAGE
+      - key: VELSA_ATC_STAGE
         value: ""
-      - key: VENSA_WAZZUP_KEY
+      - key: VELSA_WAZZUP_KEY
         sync: false
