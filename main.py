@@ -334,7 +334,7 @@ async def procesar_deal(deal_id: str, empresa: dict):
 @app.get("/test/{empresa_key}/{deal_id}")
 async def test_deal(empresa_key: str, deal_id: str, background_tasks: BackgroundTasks):
     if empresa_key not in EMPRESAS:
-        return JSONResponse({"error": f"Empresa '{empresa_key}' no encontrada. Usa: novonet, vensa"}, status_code=404)
+        return JSONResponse({"error": f"Empresa '{empresa_key}' no encontrada. Usa: novonet, velsa"}, status_code=404)
     background_tasks.add_task(procesar_deal, deal_id, EMPRESAS[empresa_key])
     return {"status": "procesando", "deal_id": deal_id, "empresa": EMPRESAS[empresa_key]["nombre"]}
 
