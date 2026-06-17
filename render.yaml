@@ -28,6 +28,10 @@ services:
       - key: VELSA_BITRIX
         value: https://aclopecuador.bitrix24.es/rest/1/49hra49433psie0t
       - key: VELSA_ATC_STAGE
-        value: ""
+        value: "C8:UC_Q9LSSI"
       - key: VELSA_WAZZUP_KEY
         sync: false
+      - key: ATC_POLL_ENABLED
+        value: "true"
+      - key: ATC_POLL_INTERVAL_SECONDS
+        value: "600"

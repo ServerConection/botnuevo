@@ -8,6 +8,7 @@
 import os
 import re
 import json
+import asyncio
 import httpx
 import psycopg2
 from datetime import datetime
@@ -47,6 +48,13 @@ EMPRESAS = {
         "wazzup_key":   os.getenv("VELSA_WAZZUP_KEY", "3340c8993cf940639f06cf894e2b8143"),
     },
 }
+
+# Polling automático de leads que pasan a ATC (sin webhook de Bitrix).
+# Lee directamente las tablas ya sincronizadas en esta misma base (bddgeneral):
+#   - VELSA: bitrix_deals + bitrix_etapas (stage_id -> nombre de etapa)
+#   - NOVONET: mestra_bitrix (b_etapa_de_la_negociacion ya viene resuelta como texto)
+ATC_POLL_INTERVAL_SECONDS = int(os.getenv("ATC_POLL_INTERVAL_SECONDS", 600))
+ATC_POLL_ENABLED = os.getenv("ATC_POLL_ENABLED", "true").lower() in ("1", "true", "yes")
 # ─────────────────────────────────────────────────────────
 
 
@@ -83,6 +91,165 @@ def guardar_auditoria(data: dict):
         log.info(f"Auditoria guardada: deal {data['id_bitrix']} [{data['empresa']}] [{data['tipo_canal']}]")
     finally:
         conn.close()
+
+
+def _get_conn():
+    return psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD)
+
+
+def init_watermark_table():
+    """Crea (si no existe) la tabla de control para detectar transiciones a ATC sin webhook."""
+    conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS atc_watermark (
+                empresa        VARCHAR(20)  NOT NULL,
+                deal_id        VARCHAR(50)  NOT NULL,
+                last_stage     TEXT,
+                last_modified  TEXT,
+                audited        BOOLEAN DEFAULT FALSE,
+                detectado_en   TIMESTAMP DEFAULT now(),
+                PRIMARY KEY (empresa, deal_id)
+            )
+        """)
+        conn.commit()
+        log.info("Tabla atc_watermark verificada/creada.")
+    finally:
+        conn.close()
+
+
+def _fetch_velsa_en_atc():
+    """Deals VELSA cuya etapa actual (resuelta vía bitrix_etapas) es 'ATC'."""
+    conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT bd.id::text, be.nombre, bd.fecha_modificacion::text
+            FROM bitrix_deals bd
+            JOIN bitrix_etapas be
+              ON be.status_id = bd.stage_id AND be.category_id = bd.category_id
+            WHERE be.nombre = 'ATC'
+        """)
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def _fetch_novonet_en_atc():
+    """Deals NOVONET cuya etapa actual (ya resuelta como texto) es 'ATC'."""
+    conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT b_id, 'ATC',
+                   COALESCE(b_modificado_el_fecha, '') || ' ' || COALESCE(b_modificado_el_hora, '')
+            FROM mestra_bitrix
+            WHERE b_etapa_de_la_negociacion = 'ATC'
+              AND b_id IS NOT NULL
+        """)
+        return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def _watermark_lookup(empresa: str, deal_id: str):
+    conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT last_stage, last_modified FROM atc_watermark WHERE empresa=%s AND deal_id=%s",
+            (empresa, deal_id)
+        )
+        return cur.fetchone()
+    finally:
+        conn.close()
+
+
+def _watermark_upsert(empresa: str, deal_id: str, stage: str, modified: str):
+    conn = _get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO atc_watermark (empresa, deal_id, last_stage, last_modified, audited, detectado_en)
+            VALUES (%s, %s, %s, %s, TRUE, now())
+            ON CONFLICT (empresa, deal_id) DO UPDATE SET
+                last_stage = EXCLUDED.last_stage,
+                last_modified = EXCLUDED.last_modified,
+                audited = TRUE,
+                detectado_en = now()
+        """, (empresa, deal_id, stage, modified))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+async def revisar_y_disparar_auditorias():
+    """
+    Poll periódico (sin webhook): revisa las tablas ya sincronizadas en bddgeneral
+    cada ATC_POLL_INTERVAL_SECONDS y dispara una auditoria para cada deal que:
+      - no tenía registro previo en atc_watermark (nuevo en ATC), o
+      - su 'last_modified' cambió respecto al watermark (re-entró a ATC tras moverse).
+    """
+    try:
+        velsa_rows    = await asyncio.to_thread(_fetch_velsa_en_atc)
+        novonet_rows  = await asyncio.to_thread(_fetch_novonet_en_atc)
+    except Exception as e:
+        log.error(f"Error consultando tablas de ATC para polling: {e}")
+        return
+
+    candidatos = [("velsa", *r) for r in velsa_rows] + [("novonet", *r) for r in novonet_rows]
+    nuevos = 0
+
+    for empresa_key, deal_id, etapa, modificado in candidatos:
+        deal_id = str(deal_id)
+        try:
+            watermark = await asyncio.to_thread(_watermark_lookup, empresa_key, deal_id)
+        except Exception as e:
+            log.error(f"Error leyendo watermark {empresa_key}/{deal_id}: {e}")
+            continue
+
+        es_nuevo = (
+            watermark is None
+            or watermark[0] != "ATC"
+            or (watermark[1] or "") != (modificado or "")
+        )
+        if not es_nuevo:
+            continue
+
+        nuevos += 1
+        log.info(f"ATC detectado por polling: {empresa_key}/{deal_id} (modificado={modificado})")
+        try:
+            await procesar_deal(deal_id, EMPRESAS[empresa_key])
+        except Exception as e:
+            log.error(f"Error auditando {empresa_key}/{deal_id} desde el poller: {e}")
+            continue
+
+        try:
+            await asyncio.to_thread(_watermark_upsert, empresa_key, deal_id, "ATC", modificado)
+        except Exception as e:
+            log.error(f"Error actualizando watermark {empresa_key}/{deal_id}: {e}")
+
+    log.info(f"Polling ATC: {len(candidatos)} en ATC actualmente, {nuevos} auditados en este ciclo.")
+
+
+async def _poller_loop():
+    await asyncio.to_thread(init_watermark_table)
+    while True:
+        try:
+            await revisar_y_disparar_auditorias()
+        except Exception as e:
+            log.error(f"Error en ciclo de polling ATC: {e}")
+        await asyncio.sleep(ATC_POLL_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def _on_startup():
+    if ATC_POLL_ENABLED:
+        asyncio.create_task(_poller_loop())
+        log.info(f"Polling ATC activado cada {ATC_POLL_INTERVAL_SECONDS}s.")
+    else:
+        log.info("Polling ATC deshabilitado (ATC_POLL_ENABLED=false).")
 
 
 # ════════════════════════════════════════════════════════
@@ -341,6 +508,12 @@ async def test_deal(empresa_key: str, deal_id: str, background_tasks: Background
 @app.get("/health")
 async def health():
     return {"status": "ok", "modelo": GROQ_MODEL, "empresas": list(EMPRESAS.keys())}
+
+@app.post("/poll/run")
+async def poll_run_now(background_tasks: BackgroundTasks):
+    """Dispara manualmente un ciclo de polling ATC (sin esperar el intervalo)."""
+    background_tasks.add_task(revisar_y_disparar_auditorias)
+    return {"status": "ciclo de polling lanzado"}
 
 if __name__ == "__main__":
     import uvicorn
