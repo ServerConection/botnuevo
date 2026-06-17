@@ -55,6 +55,9 @@ EMPRESAS = {
 #   - NOVONET: mestra_bitrix (b_etapa_de_la_negociacion ya viene resuelta como texto)
 ATC_POLL_INTERVAL_SECONDS = int(os.getenv("ATC_POLL_INTERVAL_SECONDS", 600))
 ATC_POLL_ENABLED = os.getenv("ATC_POLL_ENABLED", "true").lower() in ("1", "true", "yes")
+# Cuántos deals se auditan en paralelo. Con miles de candidatos en el primer
+# barrido (backlog histórico), procesarlos uno por uno tardaría horas.
+ATC_POLL_CONCURRENCY = int(os.getenv("ATC_POLL_CONCURRENCY", 8))
 # ─────────────────────────────────────────────────────────
 
 
@@ -184,12 +187,47 @@ def _watermark_upsert(empresa: str, deal_id: str, stage: str, modified: str):
         conn.close()
 
 
+async def _procesar_candidato(sem: asyncio.Semaphore, empresa_key: str, deal_id: str, etapa: str, modificado: str) -> bool:
+    """Procesa un candidato individual respetando el límite de concurrencia. Devuelve True si auditó."""
+    deal_id = str(deal_id)
+    async with sem:
+        try:
+            watermark = await asyncio.to_thread(_watermark_lookup, empresa_key, deal_id)
+        except Exception as e:
+            log.error(f"Error leyendo watermark {empresa_key}/{deal_id}: {e}")
+            return False
+
+        es_nuevo = (
+            watermark is None
+            or watermark[0] != "ATC"
+            or (watermark[1] or "") != (modificado or "")
+        )
+        if not es_nuevo:
+            return False
+
+        log.info(f"ATC detectado por polling: {empresa_key}/{deal_id} (modificado={modificado})")
+        try:
+            await procesar_deal(deal_id, EMPRESAS[empresa_key])
+        except Exception as e:
+            log.error(f"Error auditando {empresa_key}/{deal_id} desde el poller: {e}")
+            return False
+
+        try:
+            await asyncio.to_thread(_watermark_upsert, empresa_key, deal_id, "ATC", modificado)
+        except Exception as e:
+            log.error(f"Error actualizando watermark {empresa_key}/{deal_id}: {e}")
+
+        return True
+
+
 async def revisar_y_disparar_auditorias():
     """
     Poll periódico (sin webhook): revisa las tablas ya sincronizadas en bddgeneral
     cada ATC_POLL_INTERVAL_SECONDS y dispara una auditoria para cada deal que:
       - no tenía registro previo en atc_watermark (nuevo en ATC), o
       - su 'last_modified' cambió respecto al watermark (re-entró a ATC tras moverse).
+    Procesa hasta ATC_POLL_CONCURRENCY deals en paralelo para no tardar horas
+    cuando hay miles de candidatos (p.ej. el primer barrido histórico).
     """
     try:
         velsa_rows    = await asyncio.to_thread(_fetch_velsa_en_atc)
@@ -199,36 +237,14 @@ async def revisar_y_disparar_auditorias():
         return
 
     candidatos = [("velsa", *r) for r in velsa_rows] + [("novonet", *r) for r in novonet_rows]
-    nuevos = 0
+    sem = asyncio.Semaphore(ATC_POLL_CONCURRENCY)
 
-    for empresa_key, deal_id, etapa, modificado in candidatos:
-        deal_id = str(deal_id)
-        try:
-            watermark = await asyncio.to_thread(_watermark_lookup, empresa_key, deal_id)
-        except Exception as e:
-            log.error(f"Error leyendo watermark {empresa_key}/{deal_id}: {e}")
-            continue
-
-        es_nuevo = (
-            watermark is None
-            or watermark[0] != "ATC"
-            or (watermark[1] or "") != (modificado or "")
-        )
-        if not es_nuevo:
-            continue
-
-        nuevos += 1
-        log.info(f"ATC detectado por polling: {empresa_key}/{deal_id} (modificado={modificado})")
-        try:
-            await procesar_deal(deal_id, EMPRESAS[empresa_key])
-        except Exception as e:
-            log.error(f"Error auditando {empresa_key}/{deal_id} desde el poller: {e}")
-            continue
-
-        try:
-            await asyncio.to_thread(_watermark_upsert, empresa_key, deal_id, "ATC", modificado)
-        except Exception as e:
-            log.error(f"Error actualizando watermark {empresa_key}/{deal_id}: {e}")
+    resultados = await asyncio.gather(
+        *[_procesar_candidato(sem, empresa_key, deal_id, etapa, modificado)
+          for empresa_key, deal_id, etapa, modificado in candidatos],
+        return_exceptions=True
+    )
+    nuevos = sum(1 for r in resultados if r is True)
 
     log.info(f"Polling ATC: {len(candidatos)} en ATC actualmente, {nuevos} auditados en este ciclo.")
 

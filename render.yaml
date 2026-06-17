@@ -35,3 +35,5 @@ services:
         value: "true"
       - key: ATC_POLL_INTERVAL_SECONDS
         value: "600"
+      - key: ATC_POLL_CONCURRENCY
+        value: "8"
